@@ -1,0 +1,133 @@
+#!/usr/bin/ksh93
+#
+# Developed by Phil DeMonaco
+#
+# Monitor system resource controller service state
+# ============================================================
+#
+# This script is to be used as a monitor command for nagios 
+# to remotely determine the state of a src service
+#
+# ============================================================
+# Modfication List
+# ============================================================
+# 1.0 Initial version of the script
+# ============================================================
+
+# set -x # Enable tracing
+
+USAGE="This script is used to check the status of AIX system resource controller
+       subsystems:
+        check_aix_src <subsystem> <target_state>
+	  subsystem	: Name of the system resource controller subsystem 
+	  target_state	: Should the subsystem be active or inoperative?
+"
+
+# ------------------- Variable definition -------------------
+
+## Constants
+VAL_OK=0
+VAL_TRUE=0
+VAL_FALSE=1
+# nagios states
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+STATE_FULLDERP=4
+# src states
+STATE_ACTIVE="active"
+STATE_INACTIVE="inoperative"
+STATE_TARGET="none"
+STATE_OTHER="none"
+
+# Command paths
+CMD_AWK=$(which awk)
+CMD_LSSRC=$(which lssrc)
+CMD_TAIL=$(which tail)
+
+# FLAGS
+ABORT=${VAL_FALSE}
+STATUS=${STATE_FULLDERP}
+
+if [[ -z $2 ]]
+then
+  echo "Error: missing parameter - target_state!"
+  ABORT=${VAL_TRUE}
+  STATUS=${STATE_UNKNOWN}
+else
+  STATE_TARGET=$2
+
+  case "${STATE_TARGET}" in 
+    "${STATE_ACTIVE}")          # target is active
+      STATE_OTHER=${STATE_INACTIVE}
+      ;;
+    "${STATE_INACTIVE}")        # target is inoperative
+      STATE_OTHER=${STATE_ACTIVE}
+      ;;
+    *)				# invalid state 
+      echo "Error: invalid target_state - ${STATE_TARGET}"
+      ABORT=${VAL_TRUE}
+      STATUS=${STATE_UNKNOWN}
+  esac
+fi
+
+# Process input variables
+if [[ ${ABORT} -ne ${VAL_TRUE} && -z $1 ]];
+then
+  echo "Error: missing parameter - service!"
+  ABORT=${VAL_TRUE}
+  STATUS=${STATE_UNKNOWN}
+else
+  SUBSYSTEM=$1
+fi
+
+# Command definitions
+CMD_CHECK="${CMD_LSSRC} -s ${SUBSYSTEM}"
+
+# Execute check
+if [[ ${ABORT} -ne ${VAL_TRUE} ]]
+then
+  MON_VAL=$(eval "${CMD_CHECK}")
+  MON_RC="$?"
+  
+  if [[ ${VAL_OK} -ne ${MON_RC} ]]
+  then
+    echo "Error: ${MON_VAL}"
+    ABORT=${VAL_TRUE}
+    STATUS=${STATE_UNKNOWN}
+  fi
+fi
+
+# Abort if an error has already occured, otherwise parse the state
+if [[ ${ABORT} -ne ${VAL_TRUE} ]]
+then
+  MON_RET=$(echo "${MON_VAL}" | ${CMD_TAIL} -n 1) 
+  set -A MON_ARRAY ${MON_RET}
+
+  MON_LENGTH=${#MON_ARRAY[@]}
+  
+  # If the subsystem is up print the PID
+  if [[ ${MON_ARRAY[$MON_LENGTH-1]} = ${STATE_ACTIVE} ]]
+  then
+    STRING_PID="PID - ${MON_ARRAY[$MON_LENGTH-2]}"
+  else
+    STRING_PID=""
+  fi
+
+  case ${MON_ARRAY[$MON_LENGTH-1]} in
+    "${STATE_TARGET}")		# The service happy
+      STATUS=${STATE_OK}
+      print "Subsystem - OK: ${SUBSYSTEM} ${MON_ARRAY[$MON_LENGTH-1]} ${STRING_PID}"
+      ;;
+    "${STATE_OTHER}")		# The service unhappy
+      STATUS=${STATE_CRITICAL}
+      print "Subsystem - Critical: ${SUBSYSTEM} ${MON_ARRAY[$MON_LENGTH-1]} ${STRING_PID}"
+      ;;
+    *)
+      echo "Error: unknown state - ${MON_RET}"
+      STATUS=${STATE_UNKNOWN}
+  esac
+fi
+
+exit ${STATUS}
