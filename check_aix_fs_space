@@ -1,0 +1,173 @@
+#!/usr/bin/ksh93
+#
+# Developed by Phil DeMonaco
+#
+# Monitor file system freespace
+# ============================================================
+#
+# This script is to be used as a monitor command for nagios 
+# to remotely determine whether a specified fs is in a good
+# state. 
+#
+# ============================================================
+# Modfication List
+# ============================================================
+# 1.0  PAD - Initial version of the script
+# ============================================================
+
+# set -x # Enable tracing
+
+# ------------------- Variable definition -------------------
+
+## Constants
+VAL_TRUE=0
+VAL_FALSE=1
+VAL_PARAM_COUNT=3
+VAL_MAX_THRESHOLD=100
+# Monitor Array
+VAL_MON_LENGTH=7
+VAL_MONINDEX_FS=0
+VAL_MONINDEX_SIZE=1
+VAL_MONINDEX_FREE=2
+VAL_MONINDEX_PUSED=3
+VAL_MONINDEX_IUSED=4
+VAL_MONINDEX_PIUSED=5
+VAL_MONINDEX_MPOINT=6
+# nagios states
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+STATE_FULLDERP=4
+# Error codes
+ERROR_MISSING_PARM=1
+ERROR_WARNCRIT_PARM=2
+ERROR_MIXED_THRESHOLDS=3
+ERROR_MISSING_FS=4
+ERROR_CHECK_FAILED=5
+ERROR_RESULT_COMPONENTS=6
+# Control variables
+VAR_CRIT_FREE=-1
+VAR_WARN_FREE=-1
+# Regular expressions
+REG_INTEGER='^[0-9]+$'
+
+## Command paths
+CMD_DF=$(which df)
+CMD_GREP=$(which grep)
+CMD_TAIL=$(which tail)
+CMD_SED=$(which sed)
+
+## Flags
+ABORT=${VAL_FALSE}
+STATUS=${STATE_FULLDERP}
+
+# Trivial function designed to output errors & set failure states
+error_help() 
+{
+  case "$1" in
+    ${ERROR_MISSING_PARM}) 
+      echo "Error: missing parameter - $2 provided ${VAL_PARAM_COUNT} required"
+      ;;
+    ${ERROR_WARNCRIT_PARM})
+      echo "Error: invalid parameter - $2 is not an integer less than or equal to ${VAL_MAX_THRESHOLD}"
+      ;;
+    ${ERROR_MIXED_THRESHOLDS})
+      echo "Error: nonsense threshold - warning at $2 is greater than critical at $3"
+      ;;
+    ${ERROR_MISSING_FS})
+      echo "Error: file system - $2 is not mounted or does not exist"
+      ;;
+    ${ERROR_CHECK_FAILED})
+      echo "Error: check failed - $2"
+      ;;
+    ${ERROR_RESULT_COMPONENTS})
+      echo "Error: too few parameters were returned - expected ${2} observed ${3}"
+      ;;
+  esac
+
+  ABORT=${VAL_TRUE}
+  STATUS=${STATE_UNKNOWN}
+}
+
+# Perform a quick sanity check on our parameters
+if [[ $# -ne ${VAL_PARAM_COUNT} ]] # check the number
+then
+  error_help ${ERROR_MISSING_PARM} $# 
+elif ! [[ $1 =~ $REG_INTEGER && $1 -le $VAL_MAX_THRESHOLD ]] # warning is sane?
+then
+  error_help ${ERROR_WARNCRIT_PARM} $1
+elif ! [[ $2 =~ $REG_INTEGER && $2 -le $VAL_MAX_THRESHOLD ]] # critical is sane?
+then
+  error_help ${ERROR_WARNCRIT_PARM} $2 
+elif [[ $2 -lt $1 ]] # thresholds aren't out of order?
+then
+  error_help ${ERROR_MIXED_THRESHOLDS} $1 $2
+else # Store our variables
+  THRESHOLD_WARN=$1
+  THRESHOLD_CRIT=$2
+  FILE_SYSTEM=$3
+fi
+
+# Execute the check command and parse if successful
+if [[ ${ABORT} -ne ${VAL_TRUE} ]]
+then
+  # Check Command definition
+  #  df that filesystem in megabyte form and drop the header line
+  MON_VAL=$(${CMD_DF} -m)
+  MON_RC="$?" 
+  
+  # If we had an error list it and abort
+  if [[ ${VAL_TRUE} -ne ${MON_RC} ]]
+  then
+    error_help ${ERROR_CHECK_FAILED} ${MON_VAL}
+  else
+    # Convert the result string into an array
+    MON_RET=$(echo "${MON_VAL}" | ${CMD_GREP} -E "[[:space:]]${FILE_SYSTEM}$" | ${CMD_SED} 's/%//g')
+
+    # Make sure our file system exists
+    if [[ -z ${MON_RET} ]]
+    then
+      error_help ${ERROR_MISSING_FS} ${FILE_SYSTEM}
+    else
+      # Convert the result string into an array
+      set -A MON_ARRAY ${MON_RET}
+      
+      # Make sure we detect the right number of results
+      if [[ ${#MON_ARRAY[@]} -ne ${VAL_MON_LENGTH} ]]
+      then
+        error_help ${ERROR_RESULT_COMPONENTS} ${VAL_MON_LENGTH} ${#MON_ARRAY[@]}
+      fi
+    fi
+  fi
+fi
+
+# Abort if an error has already occured, otherwise calculate the thresholds
+if [[ ${ABORT} -ne ${VAL_TRUE} ]]
+then
+ 
+  # Determine the state based on our thresholds 
+  if [[ ${MON_ARRAY[$VAL_MONINDEX_PUSED]} -lt ${THRESHOLD_WARN} ]]
+  then
+    STATUS=${STATE_OK}
+  elif [[ ${MON_ARRAY[$VAL_MONINDEX_PUSED]} -lt ${THRESHOLD_CRIT} ]]
+  then
+    STATUS=${STATE_WARNING}
+  else
+    STATUS=${STATE_CRITICAL}
+  fi
+
+  # Print the appropriate message based on state
+  case ${STATUS} in
+    ${STATE_OK})		# The service happy
+      echo "File System - OK: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+      ;;
+    ${STATE_WARNING})		# The service unhappy
+      echo "File System - Warning: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+      ;;
+    ${STATE_CRITICAL})
+      echo "File System - Critical: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+  esac
+fi
+
+exit ${STATUS}
