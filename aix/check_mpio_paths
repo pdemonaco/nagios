@@ -18,7 +18,8 @@ USAGE="This script is used to check the status of AIX MPIO paths:
      multiple       - number of paths per LUN
      warning        - if for any disk the ratio of enabled to
                       multiple is less than this issue warn  
-     critical       - same as warning, but different threshold
+     critical       - same as warning, but lower different 
+                      threshold
 "
 
 
@@ -59,7 +60,7 @@ CMD_SORT=$(which sort)
 CMD_UNIQ=$(which uniq)
 
 ## Command
-CMD_CHECK="${CMD_LSPATH} | ${CMD_GREP} Enabled | ${CMD_AWK} \'{print \$2}\' | ${CMD_SORT} | ${CMD_UNIQ} -c "
+CMD_CHECK="${CMD_LSPATH} | ${CMD_GREP} Enabled | ${CMD_AWK} \'{print \$2}\' | ${CMD_SORT} | ${CMD_UNIQ} -c | ${CMD_SORT} -n"
 
 ## Flags
 ABORT=${VAL_FALSE}
@@ -78,7 +79,7 @@ error_help()
     ${ERROR_MIXED_THRESHOLDS})
       echo "Error: nonsense threshold - warning at $2 is greater than critical at $3"
       ;;
-    ${ERROR_CHECK_FAILED})
+    ${ERROR_CHECK_FAILED}) # Probably unusable for this 
       echo "Error: check failed - $2"
       ;;
     ${ERROR_RESULT_COMPONENTS})
@@ -93,16 +94,16 @@ error_help()
 # Perform a quick sanity check on our parameters
 if [[ $# -ne ${VAL_PARAM_COUNT} ]] # check the number
 then
-  error_help ${ERROR_MISSING_PARM} $# 
+  error_help $ERROR_MISSING_PARM $# 
 elif ! [[ $1 =~ $REG_INTEGER && $1 -le $VAL_MAX_THRESHOLD ]] # warning is sane?
 then
-  error_help ${ERROR_WARNCRIT_PARM} $1
+  error_help $ERROR_WARNCRIT_PARM $1
 elif ! [[ $2 =~ $REG_INTEGER && $2 -le $VAL_MAX_THRESHOLD ]] # critical is sane?
 then
-  error_help ${ERROR_WARNCRIT_PARM} $2 
+  error_help $ERROR_WARNCRIT_PARM $2 
 elif [[ $2 -lt $1 ]] # thresholds aren't out of order?
 then
-  error_help ${ERROR_MIXED_THRESHOLDS} $1 $2
+  error_help $ERROR_MIXED_THRESHOLDS $1 $2
 else # Store our variables
   THRESHOLD_WARN=$1
   THRESHOLD_CRIT=$2
@@ -112,71 +113,37 @@ fi
 # Execute the check command and parse if successful
 if [[ ${ABORT} -ne ${VAL_TRUE} ]]
 then
-  # Check Command definition
-  #  df that filesystem in megabyte form and drop the header line
-  MON_VAL=$(${MON_CMD})
-  MON_RC="$?" 
+  # Get the total number of disks and paths
+  DISK_COUNT=$( ${CMD_LSPATH} | ${CMD_GREP} Enabled | ${CMD_AWK} \'{print \$2}\' | ${CMD_SORT} | ${CMD_UNIQ} | ${CMD_SORT} )
+  PATH_COUNT=$( ${CMD_LSPATH} | ${CMD_GREP} Enabled | wc -l )
+  PATH_TARGET=$(( $DISK_COUNT * $PATH_MULTIPLE ))
+
+  # We're interested in the percent enabled - there should be disks * multiple paths
+  RATIO=$(( $PATH_COUNT / $PATH_TARGET * 100 ))
   
-  # If we had an error list it and abort
-  for MON_ENTRY in $(${MON_CMD})
-  do
-      # Attempt to get the current row as an array
-      set -A MON_ARRAY ${MON_ENTRY}
-
-
-
-  done
-
-  if [[ ${VAL_TRUE} -ne ${MON_RC} ]]
-  then
-    error_help ${ERROR_CHECK_FAILED} ${MON_VAL}
+  if [[ $RATIO -lt $THRESHOLD_CRIT ]]
+    STATUS=$STATE_CRITICAL
+  elif [[ $RATIO -lt $THRESHOLD_WARN ]]
+    STATUS=$STATE_WARNING
   else
-    # Convert the result string into an array
-    MON_RET=$(echo "${MON_VAL}" | ${CMD_GREP} -E "[[:space:]]${FILE_SYSTEM}$" | ${CMD_SED} 's/%//g')
-
-    # Make sure our file system exists
-    if [[ -z ${MON_RET} ]]
-    then
-      error_help ${ERROR_MISSING_FS} ${FILE_SYSTEM}
-    else
-      # Convert the result string into an array
-      set -A MON_ARRAY ${MON_RET}
-     
-      # HERES WHERE I LEFT OFF
-      # Make sure we detect the right number of results
-      if [[ ${#MON_ARRAY[@]} -ne ${VAL_MON_LENGTH} ]]
-      then
-        error_help ${ERROR_RESULT_COMPONENTS} ${VAL_MON_LENGTH} ${#MON_ARRAY[@]}
-      fi
-    fi
-  fi
+    STATUS=$STATE_OK
+  fi 
 fi
 
 # Abort if an error has already occured, otherwise calculate the thresholds
 if [[ ${ABORT} -ne ${VAL_TRUE} ]]
 then
  
-  # Determine the state based on our thresholds 
-  if [[ ${MON_ARRAY[$VAL_MONINDEX_PUSED]} -lt ${THRESHOLD_WARN} ]]
-  then
-    STATUS=${STATE_OK}
-  elif [[ ${MON_ARRAY[$VAL_MONINDEX_PUSED]} -lt ${THRESHOLD_CRIT} ]]
-  then
-    STATUS=${STATE_WARNING}
-  else
-    STATUS=${STATE_CRITICAL}
-  fi
-
   # Print the appropriate message based on state
-  case ${STATUS} in
-    ${STATE_OK})		# The service happy
-      echo "File System - OK: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+  case $STATUS in
+    $STATE_OK)       # The service happy
+      echo "MPIO Paths - OK: $PATH_COUNT of $PATH_TARGET paths enabled for $DISK_COUNT disks"
       ;;
-    ${STATE_WARNING})		# The service unhappy
-      echo "File System - Warning: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+    $STATE_WARNING)  # The service unhappy
+      echo "MPIO Paths - Warning: Only $PATH_COUNT of $PATH_TARGET paths enabled for $DISK_COUNT disks"
       ;;
-    ${STATE_CRITICAL})
-      echo "File System - Critical: ${MON_ARRAY[$VAL_MONINDEX_MPOINT]} ${MON_ARRAY[$VAL_MONINDEX_PUSED]}% Used (${MON_ARRAY[$VAL_MONINDEX_FREE]} of ${MON_ARRAY[$VAL_MONINDEX_SIZE]} MB free)"
+    $STATE_CRITICAL) # It's really really unhappy
+      echo "MPIO Paths - Critical: Only $PATH_COUNT of $PATH_TARGET paths enabled for $DISK_COUNT disks"
   esac
 fi
 
